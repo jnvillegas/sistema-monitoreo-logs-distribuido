@@ -3,17 +3,29 @@ import { HttpService } from '@nestjs/axios';
 import * as chokidar from 'chokidar';
 import * as fs from 'fs';
 import * as path from 'path';
-import { firstValueFrom } from 'rxjs';
+import { buffer, firstValueFrom } from 'rxjs';
 import { ConfigService } from '@nestjs/config';
 import { log } from 'console';
+import { MessageLogDto } from './dto/message-log.dto';
 
 @Injectable()
 export class WatcherService {
 
     private readonly logger = new Logger(WatcherService.name);
+
     private filePositions = new Map<String, number>();
+
     private readonly LOG_DIR_KEY = 'LOG_DIRECTORY';
+
     private readonly SERVER_URL_KEY = 'CENTRAL_SERVER_URL';
+    
+    private logBuffers = new Map<string, string[]>();
+
+    private readonly BUFFER_SIZE_KEY = 'LOG_BUFFER_SIZE';
+    
+    private readonly CRITERIA_KEY = 'LOG_CRITERIA';
+
+
 
     constructor(private readonly httpService: HttpService, private readonly configService: ConfigService) {}
 
@@ -71,31 +83,76 @@ export class WatcherService {
     private async processLines(content: string, filePath: string) {
         
         const lines = content.split('\n').filter(line => line.trim() != '');
-        const serviceName = path.basename(filePath, '.log');
-        const serverUrl = this.configService.get<string>(this.SERVER_URL_KEY);
+        const serviceName = this.extractServiceName(filePath);
+        const criteria = this.configService.get<RegExp>(this.CRITERIA_KEY, /\[?(ERROR|CRITICAL|FATAL)\]?/i);
+        const bufferSize = this.configService.get<number>(this.BUFFER_SIZE_KEY, 0);
+        
+        
 
-        if (!serverUrl) {
-            throw new Error('log directory undefined!');
+        if (!this.logBuffers.has(filePath)) {
+            this.logBuffers.set(filePath, []);
         }
 
+        const buffer = this.logBuffers.get(filePath)!;
+
         for (const line of lines) {
-            
-            try {
 
-                const json = {
-                    service: serviceName,
-                    message: line,
-                    timestamp: new Date().toISOString()
-                };
+            const isError = criteria.test(line);
+            buffer?.push(line);
 
-                await firstValueFrom(this.httpService.post(serverUrl, json));
-                this.logger.debug(`[Sent] ${serviceName} -> log line processed.`);
+            if (buffer.length >= bufferSize && !isError) {
+                buffer.shift();
+            }
 
-            } catch (error) {
-                this.logger.error(`Error enviando log, ${error}`);
+            if (isError) {
+                this.logger.warn('error detected');
+                const batchToSend = [...buffer];
+                buffer.length = 0;
+                await this.sendBatchToCentralServer(batchToSend, serviceName);
+
             }
         }
 
+    }
+
+
+    async sendBatchToCentralServer(batchToSend: string[], serviceName: string) {
+
+        const url = this.configService.get<string>(this.SERVER_URL_KEY);
+
+        if (!url) {
+            throw new Error('Central server url undefined!');
+        }
+
+        try {
+            
+            for (const line of batchToSend) {
+
+                const payload: MessageLogDto = {
+                    service: serviceName,
+                    message: line,
+                    timestamp: new Date()
+                };
+
+                await this.httpService.axiosRef.post(url, payload);
+
+            }
+
+
+        } catch (error) {
+
+            const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+            const errorStack = error instanceof Error ? error.stack : undefined;
+
+            this.logger.error(` : ${errorMessage}`, errorStack);
+            
+        }
+    }
+
+    private extractServiceName(filePath: string): string {
+        const parts = filePath.replace(/\\/g, '/').split('/'); 
+        const fileName = parts[parts.length - 1];
+        return fileName.split('.')[0];
     }
 
 }
