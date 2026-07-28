@@ -11,20 +11,14 @@ import { MessageLogDto } from './dto/message-log.dto';
 @Injectable()
 export class WatcherService {
 
-    private readonly logger = new Logger(WatcherService.name);
-
     private filePositions = new Map<String, number>();
-
-    private readonly LOG_DIR_KEY = 'LOG_DIRECTORY';
-
-    private readonly SERVER_URL_KEY = 'CENTRAL_SERVER_URL';
-    
     private logBuffers = new Map<string, string[]>();
 
+    private readonly logger = new Logger(WatcherService.name);
+    private readonly LOG_DIR_KEY = 'LOG_DIRECTORY';
+    private readonly SERVER_URL_KEY = 'CENTRAL_SERVER_URL';
     private readonly BUFFER_SIZE_KEY = 'LOG_BUFFER_SIZE';
-    
     private readonly CRITERIA_KEY = 'LOG_CRITERIA';
-
 
 
     constructor(private readonly httpService: HttpService, private readonly configService: ConfigService) {}
@@ -52,9 +46,11 @@ export class WatcherService {
         const watcher = chokidar.watch(logDir, chokidarProperties);
 
         watcher.on('add', (filePath) => {
+            
             const stats = fs.statSync(filePath);
             this.filePositions.set(filePath, stats.size);
             this.logger.debug(`[File detected] ${filePath}`);
+
             }
         );
 
@@ -126,17 +122,17 @@ export class WatcherService {
 
         try {
             
-            for (const line of batchToSend) {
+            const payloadBatch: MessageLogDto[] = batchToSend.map(line => ({
 
-                const payload: MessageLogDto = {
-                    service: serviceName,
-                    message: line,
-                    timestamp: new Date()
-                };
+                service: serviceName,
+                message: line,
+                timestamp: new Date()
 
-                await this.httpService.axiosRef.post(url, payload);
+            }));
 
-            }
+            await this.httpService.axiosRef.post(url, payloadBatch);
+
+            this.logger.log(`[*] Lote de ${payloadBatch.length} logs enviado exitosamente a Central.`);
 
 
         } catch (error) {
