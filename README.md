@@ -1,98 +1,154 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Sistema de Monitoreo de Logs Distribuido
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+Shipper de logs construido con NestJS que vigila un directorio de archivos de log, aplica **edge filtering** (filtra en el borde) y envía al servidor central solo los errores **con su contexto previo**. Pensado para entornos de microservicios donde cada nodo genera logs propios y se necesita visibilidad centralizada sin inundar al servidor.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+---
 
-## Description
-
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
-
-## Project setup
+## Quick path
 
 ```bash
-$ npm install
+# 1. Instalar dependencias
+npm install
+
+# 2. Crear .env con las variables mínimas (ver .env.example)
+cp .env.example .env
+
+# 3. Crear el directorio que se va a vigilar (debe coincidir con LOG_DIRECTORY)
+mkdir logs
+
+# 4. Levantar en modo desarrollo
+npm run start:dev
 ```
 
-## Compile and run the project
+El servicio arranca en `http://localhost:3000` (o el puerto de `PORT`) y comienza a vigilar `LOG_DIRECTORY`. Para verlo funcionar: escribí una línea con la palabra `ERROR` dentro de cualquier archivo `.log` del directorio vigilado — debería disparar un POST al `CENTRAL_SERVER_URL`.
 
-```bash
-# development
-$ npm run start
+---
 
-# watch mode
-$ npm run start:dev
+## Cómo funciona
 
-# production mode
-$ npm run start:prod
+```
+[Archivo .log en disco]
+        │  chokidar detecta cambio (polling cada 200ms)
+        ▼
+WatcherService ── lee solo los bytes nuevos (start → end) ──▶ LogProcessorService
+                                                                    │
+                                          ¿coincide con LOG_CRITERIA?
+                                                    │
+                              ┌─────────────────────┴─────────────────────┐
+                              ▼ NO                                        ▼ SÍ
+                    RingBuffer.add(line)                 RingBuffer.flush() + línea de error
+                    (guarda contexto en memoria)              │
+                                                            ▼
+                                          HttpLogPublisherAdapter
+                                          (POST del lote al servidor central)
 ```
 
-## Run tests
+La idea clave es **edge filtering**: las líneas normales solo viven en un `RingBuffer` en memoria ( contexto temporal, tamaño configurable). Cuando aparece un error, se "vacía" el contexto y se envía **error + líneas previas** en un solo lote. Esto reduce drásticamente el tráfico hacia el servidor central y entrega los errores con el contexto necesario para diagnosticarlos.
 
-```bash
-# unit tests
-$ npm run test
+---
 
-# e2e tests
-$ npm run test:e2e
+## Arquitectura (Clean Architecture)
 
-# test coverage
-$ npm run test:cov
+El módulo `src/watcher/` sigue Clean Architecture: las dependencias apuntan hacia adentro. La regla de negocio no conoce Axios, fs ni chokidar.
+
+| Capa | Responsabilidad | Archivo |
+|------|------------------|---------|
+| `domain/` | Lógica pura, sin framework | `ring-buffer.ts` |
+| `usecase/` | Regla de negocio (edge filtering) | `log-processor-service.ts` |
+| `interface/` | Contratos (puertos) | `interface-log-publisher.ts` |
+| `infrastructure/` | Adaptadores externos (fs, HTTP) | `wathcer-service.ts`, `http-log-publisher-adapter.ts` |
+
+**Patrón clave**: `LogProcessorService` inyecta `ILogPublisher` (el contrato), no `HttpLogPublisherAdapter` (la implementación). El binding se hace en `logs.module.ts` vía `LOG_PUBLISHER_TOKEN`. Cambiar el transporte (HTTP → Kafka → archivo local) solo requiere un nuevo adaptador y una línea en el módulo.
+
+---
+
+## Configuración
+
+Todas las variables se leen con `@nestjs/config`. Copiá `.env.example` a `.env` y ajustá los valores.
+
+| Variable | Requerida | Default | Descripción |
+|----------|:--------:|---------|-------------|
+| `LOG_DIRECTORY` | Sí | — | Directorio a vigilar (se crea si no existe) |
+| `CENTRAL_SERVER_URL` | Sí | — | URL del servidor central que recibe los lotes |
+| `PORT` | No | `3000` | Puerto del proceso NestJS |
+| `LOG_BUFFER_SIZE` | No | `50` | Tamaño del `RingBuffer` (líneas de contexto por servicio) |
+| `LOG_CRITERIA` | No | `ERROR\|CRITICAL\|FATAL` | Patrón regex para detectar errores (sin las barras) |
+
+> `LOG_CRITERIA` se compila como `new RegExp(valor, 'i')`. Ejemplo: `LOG_CRITERIA=ERROR|PANIC|OOM`.
+
+---
+
+## Estructura del proyecto
+
+```
+src/
+├── main.ts                         # Bootstrap de NestJS + lectura de PORT
+├── app.module.ts                   # Módulo raíz: ConfigModule + LogsModule
+├── app.controller.ts / .service.ts  # Endpoint de salud (Hello World)
+└── watcher/
+    ├── logs.module.ts              # Binding LOG_PUBLISHER_TOKEN → HttpLogPublisherAdapter
+    ├── domain/
+    │   └── ring-buffer.ts          # Buffer circular (memoria de contexto)
+    ├── usecase/
+    │   └── log-processor-service.ts# Edge filtering + delegación al publisher
+    ├── interface/
+    │   └── interface-log-publisher.ts # Puerto ILogPublisher (contrato)
+    ├── infrastructure/
+    │   ├── wathcer-service.ts      # chokidar + lectura incremental por bytes
+    │   └── http-log-publisher-adapter.ts # Adaptador HTTP (Axios)
+    └── dto/
+        └── message-log.dto.ts      # DTO del lote enviado al servidor central
 ```
 
-## Deployment
+---
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+## Scripts
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+| Script | Qué hace |
+|--------|-----------|
+| `npm run start:dev` | Modo watch (recompila en cada cambio) |
+| `npm run start` | Arranque normal |
+| `npm run start:prod` | Producción (usa `dist/main.js`) |
+| `npm run build` | Compila a `dist/` |
+| `npm test` | Tests unitarios (Jest) |
+| `npm run test:e2e` | Tests end-to-end |
+| `npm run test:cov` | Cobertura de tests |
+| `npm run lint` | ESLint con fix |
+| `npm run format` | Prettier |
 
-```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+Requisitos: **Node >= 20**, **npm >= 10** (ver `engines` en `package.json`).
+
+---
+
+## Formato del lote enviado
+
+Cada lote es un `POST` a `CENTRAL_SERVER_URL` con un array de `MessageLogDto`:
+
+```json
+[
+  { "service": "pagos-svc", "message": "...línea de contexto...", "timestamp": "2026-08-01T12:00:00.000Z" },
+  { "service": "pagos-svc", "message": "...línea de error...",   "timestamp": "2026-08-01T12:00:00.100Z" }
+]
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+---
 
-## Resources
+## Limitaciones conocidas
 
-Check out a few resources that may come in handy when working with NestJS:
+Honestidad técnica: este shipper está en estado funcional pero con puntos débiles a corregir antes de producción.
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+- **Lectura por chunks, no por líneas** (`wathcer-service.ts:66`): un chunk de `createReadStream` puede cortar una línea a la mitad. El detector de errores y el contexto pueden fallar si la palabra `ERROR` queda partida entre dos chunks.
+- **`extractServiceName` definido pero no usado** (`wathcer-service.ts:74`): se pasa el path completo como `serviceName`, por lo que el `Map` de `RingBuffer` arma una entrada distinta por cada archivo y el contexto no se aísla por microservicio.
+- **Puntero adelantado sin esperar el stream** (`wathcer-service.ts:71`): se actualiza `filePosition` antes de que termine la lectura. Cambios concurrentes pueden perderse o leerse doble.
+- **Sin retry ni backoff** en el envío HTTP (`http-log-publisher-adapter.ts:28`): si el servidor central está caído, el lote se pierde y solo queda en logs.
+- **Sin tests del módulo `watcher`**: el único test existente es el spec "Hello World" del starter NestJS.
 
-## Support
+---
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+## Próximos pasos
 
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+1. Corregir la lectura por líneas (bug crítico #1).
+2. Conectar `extractServiceName` para aislar el contexto por microservicio.
+3. Agregar retry/backoff al `HttpLogPublisherAdapter`.
+4. Cubrir el módulo `watcher` con tests unitarios.
+5. Documentar las decisiones de arquitectura como ADRs.
