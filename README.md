@@ -137,10 +137,10 @@ Cada lote es un `POST` a `CENTRAL_SERVER_URL` con un array de `MessageLogDto`:
 
 Honestidad técnica: este shipper está en estado funcional pero con puntos débiles a corregir antes de producción.
 
-- **Lectura por chunks, no por líneas** (`wathcer-service.ts:66`): un chunk de `createReadStream` puede cortar una línea a la mitad. El detector de errores y el contexto pueden fallar si la palabra `ERROR` queda partida entre dos chunks.
-- **`extractServiceName` definido pero no usado** (`wathcer-service.ts:74`): se pasa el path completo como `serviceName`, por lo que el `Map` de `RingBuffer` arma una entrada distinta por cada archivo y el contexto no se aísla por microservicio.
-- **Puntero adelantado sin esperar el stream** (`wathcer-service.ts:71`): se actualiza `filePosition` antes de que termine la lectura. Cambios concurrentes pueden perderse o leerse doble.
-- **Sin retry ni backoff** en el envío HTTP (`http-log-publisher-adapter.ts:28`): si el servidor central está caído, el lote se pierde y solo queda en logs.
+- **Lectura por chunks, no por líneas** (`wathcer-service.ts:73`): un chunk de `createReadStream` puede cortar una línea a la mitad. El detector de errores y el contexto pueden fallar si la palabra `ERROR` queda partida entre dos chunks.
+- **`extractServiceName` definido pero no usado** (`wathcer-service.ts:79`): se pasa el path completo como `serviceName`, por lo que el `Map` de `RingBuffer` arma una entrada distinta por cada archivo y el contexto no se aísla por microservicio.
+- **Puntero adelantado sin esperar el stream** (`wathcer-service.ts:76`): se actualiza `filePosition` antes de que termine la lectura. Cambios concurrentes pueden perderse o leerse doble.
+- **Sin retry ni backoff** en el envío HTTP (`http-log-publisher-adapter.ts:33`): si el servidor central está caído, el lote se pierde y solo queda en logs.
 - **Sin tests del módulo `watcher`**: el único test existente es el spec "Hello World" del starter NestJS.
 
 ---
